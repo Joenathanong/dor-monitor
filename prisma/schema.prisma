@@ -1,0 +1,230 @@
+// DOR — Daily Operation Review (IEG)
+// TiDB Serverless (MySQL 8 compatible).
+//
+// Jebakan TiDB yang sudah ditangani di sini (lihat README):
+//  1. relationMode = "prisma"  → setiap kolom relasi WAJIB punya @@index.
+//  2. Collation default utf8mb4_bin peka huruf besar-kecil → jalankan
+//     `npm run db:collation` setelah `db:push` (diulang tiap menambah tabel).
+//  3. Tidak ada scalar list di MySQL/TiDB.
+//  4. VARCHAR bawaan Prisma hanya 191 → kolom panjang diberi @db.VarChar/@db.Text.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider     = "mysql"
+  url          = env("DATABASE_URL")
+  relationMode = "prisma"
+}
+
+// ─── ENUM ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  PIC
+  VIEWER
+}
+
+enum FindingSource {
+  DOR
+  GEMBA
+}
+
+enum FindingStatus {
+  OPEN         // baru dilaporkan, belum ada tindak lanjut
+  IN_PROGRESS  // sudah ada tindak lanjut, belum selesai
+  DONE         // divisi penanggung jawab menyatakan selesai
+  CLOSED       // diverifikasi/ditutup oleh pelapor atau admin
+  CANCELLED    // dibatalkan (bukan temuan valid)
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ActionType {
+  ACTION        // tindak lanjut nyata
+  COMMENT       // komentar / klarifikasi
+  STATUS        // perubahan status
+  REASSIGN      // pemindahan penanggung jawab
+}
+
+// ─── MASTER ──────────────────────────────────────────────────────────────────
+
+model Division {
+  id          String   @id @default(cuid())
+  code        String   @unique @db.VarChar(32)   // INV-IEG, INV-EJI, FUL, QAQC, K3
+  name        String   @db.VarChar(100)
+  description String?  @db.VarChar(255)
+  color       String?  @db.VarChar(16)           // slot palet chart: c1..c6 (opsional)
+  isGembaTeam Boolean  @default(false) @map("is_gemba_team") // tim Gemba (QA/QC): sumber temuan default = Gemba
+  active      Boolean  @default(true)
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  users            User[]
+  reportedFindings Finding[] @relation("ReporterDivision")
+  assignedFindings Finding[] @relation("AssignedDivision")
+
+  @@map("divisions")
+}
+
+model Category {
+  id        String   @id @default(cuid())
+  code      String   @unique @db.VarChar(32)     // DELIVERY, QUALITY, SAFETY, MORAL, COST
+  name      String   @db.VarChar(100)
+  color     String?  @db.VarChar(16)             // slot palet chart
+  active    Boolean  @default(true)
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  findings Finding[]
+
+  @@map("categories")
+}
+
+model User {
+  id                 String   @id @default(cuid())
+  email              String   @unique @db.VarChar(191)
+  name               String   @db.VarChar(120)
+  // scrypt dari node:crypto — tanpa native build saat npm install.
+  passwordHash       String   @map("password_hash") @db.VarChar(255)
+  role               Role     @default(PIC)
+  divisionId         String?  @map("division_id")
+  phone              String?  @db.VarChar(32)
+  active             Boolean  @default(true)
+  mustChangePassword Boolean  @default(true) @map("must_change_password")
+  sessionVersion     Int      @default(1) @map("session_version") // naikkan untuk memaksa logout
+  lastLoginAt        DateTime? @map("last_login_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  division          Division? @relation(fields: [divisionId], references: [id])
+  reportedFindings  Finding[] @relation("Reporter")
+  assignedFindings  Finding[] @relation("Assignee")
+  closedFindings    Finding[] @relation("Closer")
+  actions           FindingAction[]
+  attachments       Attachment[]
+
+  @@index([divisionId])
+  @@map("users")
+}
+
+// ─── TEMUAN ──────────────────────────────────────────────────────────────────
+
+model Finding {
+  id          String        @id @default(cuid())
+  number      String        @unique @db.VarChar(24)   // DOR-2026-0001 / GMB-2026-0001
+  source      FindingSource @default(DOR)
+  title       String        @db.VarChar(200)
+  description String        @db.Text
+  location    String?       @db.VarChar(160)          // area / lokasi di gudang
+  categoryId  String        @map("category_id")
+  priority    Priority      @default(MEDIUM)
+  status      FindingStatus @default(OPEN)
+
+  reporterId         String  @map("reporter_id")
+  reporterDivisionId String? @map("reporter_division_id")
+  assignedDivisionId String  @map("assigned_division_id")
+  assigneeId         String? @map("assignee_id")   // PIC spesifik (opsional)
+
+  reportedAt    DateTime  @default(now()) @map("reported_at")
+  dueAt         DateTime  @map("due_at")               // reportedAt + SLA hari (dari settings saat dibuat)
+  slaDays       Int       @default(2) @map("sla_days") // snapshot SLA saat dibuat
+  firstActionAt DateTime? @map("first_action_at")     // tindak lanjut pertama → dasar KPI
+  doneAt        DateTime? @map("done_at")
+  closedAt      DateTime? @map("closed_at")
+  closedById    String?   @map("closed_by_id")
+  rootCause     String?   @map("root_cause") @db.Text
+  resolution    String?   @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  category         Category       @relation(fields: [categoryId], references: [id])
+  reporter         User           @relation("Reporter", fields: [reporterId], references: [id])
+  reporterDivision Division?      @relation("ReporterDivision", fields: [reporterDivisionId], references: [id])
+  assignedDivision Division       @relation("AssignedDivision", fields: [assignedDivisionId], references: [id])
+  assignee         User?          @relation("Assignee", fields: [assigneeId], references: [id])
+  closedBy         User?          @relation("Closer", fields: [closedById], references: [id])
+  actions          FindingAction[]
+  attachments      Attachment[]
+
+  @@index([categoryId])
+  @@index([reporterId])
+  @@index([reporterDivisionId])
+  @@index([assignedDivisionId])
+  @@index([assigneeId])
+  @@index([closedById])
+  @@index([status])
+  @@index([reportedAt])
+  @@index([dueAt])
+  @@map("findings")
+}
+
+model FindingAction {
+  id         String     @id @default(cuid())
+  findingId  String     @map("finding_id")
+  userId     String     @map("user_id")
+  type       ActionType @default(ACTION)
+  note       String     @db.Text
+  fromStatus FindingStatus? @map("from_status")
+  toStatus   FindingStatus? @map("to_status")
+  createdAt  DateTime   @default(now()) @map("created_at")
+
+  finding     Finding      @relation(fields: [findingId], references: [id])
+  user        User         @relation(fields: [userId], references: [id])
+  attachments Attachment[]
+
+  @@index([findingId])
+  @@index([userId])
+  @@map("finding_actions")
+}
+
+model Attachment {
+  id         String   @id @default(cuid())
+  findingId  String?  @map("finding_id")
+  actionId   String?  @map("action_id")
+  uploaderId String   @map("uploader_id")
+  driver     String   @default("gdrive") @db.VarChar(16)  // gdrive | local
+  fileId     String   @map("file_id") @db.VarChar(191)    // Drive fileId atau nama file lokal
+  fileName   String   @map("file_name") @db.VarChar(191)
+  mimeType   String   @map("mime_type") @db.VarChar(80)
+  size       Int      @default(0)
+  width      Int?
+  height     Int?
+  isPublic   Boolean  @default(false) @map("is_public")
+  webViewUrl String?  @map("web_view_url") @db.VarChar(512)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  finding  Finding?       @relation(fields: [findingId], references: [id])
+  action   FindingAction? @relation(fields: [actionId], references: [id])
+  uploader User           @relation(fields: [uploaderId], references: [id])
+
+  @@index([findingId])
+  @@index([actionId])
+  @@index([uploaderId])
+  @@map("attachments")
+}
+
+// ─── SETTING & PENOMORAN ─────────────────────────────────────────────────────
+
+model AppSetting {
+  key       String   @id @db.VarChar(64)
+  value     String   @db.VarChar(1024)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}
+
+model Counter {
+  key   String @id @db.VarChar(32)   // DOR-2026, GMB-2026
+  value Int    @default(0)
+
+  @@map("counters")
+}
