@@ -17,7 +17,8 @@
     "db:passwd": "tsx prisma/passwd.ts",
     "check:drive": "tsx scripts/check-drive.ts",
     "setup": "prisma db push && tsx prisma/collation.ts && tsx prisma/seed.ts",
-    "drive:auth": "tsx scripts/drive-auth.ts"
+    "drive:auth": "tsx scripts/drive-auth.ts",
+    "drive:diag": "node scripts/drive-diag.cjs"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
