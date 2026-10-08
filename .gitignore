@@ -8,3 +8,4 @@ out
 next-env.d.ts
 storage/uploads
 service-account.json
+_to_delete
