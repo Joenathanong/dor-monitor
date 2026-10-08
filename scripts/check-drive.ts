@@ -3,11 +3,13 @@
 import './load-env';
 
 async function main() {
-  const { getDrive, getDriveFolderId, driveAuthMode } = await import('../src/lib/drive');
+  const { getDrive, resolveRootFolder, driveAuthMode } = await import('../src/lib/drive');
   const mode = driveAuthMode();
   console.log('Mode auth:', mode === 'oauth' ? 'OAuth (akun Google user — My Drive boleh)' : 'Service account (folder HARUS di Shared Drive)');
   const drive = getDrive();
-  const folderId = getDriveFolderId();
+  const root = await resolveRootFolder(drive);
+  const folderId = root.id;
+  if (root.source !== 'env') console.log(`!! GDRIVE_FOLDER_ID tidak bisa dipakai — app memakai folder miliknya: GDRIVE_FOLDER_ID=${folderId}`);
   const meta = await drive.files.get({ fileId: folderId, fields: 'id,name,driveId,mimeType', supportsAllDrives: true });
   console.log('Folder:', meta.data.name, '| driveId:', meta.data.driveId ?? (mode === 'oauth' ? '(My Drive — OK untuk mode OAuth)' : '(BUKAN Shared Drive — upload akan gagal kuota!)'));
   const up = await drive.files.create({
